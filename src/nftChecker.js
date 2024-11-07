@@ -1,29 +1,23 @@
 require("dotenv").config();
-const { ethers } = require("ethers");
 const axios = require("axios");
-const { sleep } = require("./utils.js")
+const { sleep, getFunctionSignature } = require("./utils.js")
 const apiKey = process.env.ALCHEMY_API_KEY;
 
-const ERC721_ABI = [
-    "function balanceOf(address owner) view returns (uint256)",
-    "function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)",
-];
-
-// Сигнатуры функций для проверки
 const FUNCTION_SIGNATURES = {
-    "ERC-2771": "0d95b4a3", // isTrustedForwarder(address)
-    "ERC-2612": "d505accf", // permit(address,address,uint256,uint256,uint8,bytes32,bytes32)
-    "ERC-3009": "7a9e5e4b", // transferWithAuthorization(address,address,uint256,uint256,uint8,bytes32,bytes32,bytes32)
+    "ERC-2771": "isTrustedForwarder(address)",
+    "ERC-2612": "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)",
+    "ERC-3009": "transferWithAuthorization(address,address,uint256,uint256,uint8,bytes32,bytes32,bytes32)",
+    "ERC-3009_new": "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)"
 };
 
 
-async function getNFTContractsForAddress(address) {
+async function getNFTContractsForAddress(address, network) {
     try {
-        const url = `https://eth-mainnet.g.alchemy.com/nft/v3/${apiKey}/getNFTsForOwner/?owner=${address}`;
+        const url = `https://${network}.g.alchemy.com/nft/v3/${apiKey}/getNFTsForOwner/?owner=${address}`;
+        await sleep(1000)
         const response = await axios.get(url);
 
         const nftsData = response.data.ownedNfts;
-
         const nfts = {};
         const ids = {};
 
@@ -36,7 +30,7 @@ async function getNFTContractsForAddress(address) {
                 ids[contractAddress] = []
             }
             ids[contractAddress].push(tokenId);
-            nfts[contractAddress].balance++ 
+            nfts[contractAddress].balance++
         }
         return { nfts, ids };
     } catch (error) {
@@ -45,24 +39,24 @@ async function getNFTContractsForAddress(address) {
     }
 }
 
-async function checkNFTBalanceAndMetaTransactions(provider, address) {
+async function checkNFTBalanceAndMetaTransactions(provider, address, network) {
 
     try {
-        const { nfts, ids } = await getNFTContractsForAddress(address);
+        const { nfts, ids } = await getNFTContractsForAddress(address, network);
 
         for (const contractAddress of Object.keys(nfts)) {
             if (nfts[contractAddress].balance > 0) {
                 const supportedStandards = [];
+                await sleep(750)
                 const contractCode = await provider.getCode(contractAddress);
                 for (const [standard, signature] of Object.entries(FUNCTION_SIGNATURES)) {
-                    if (contractCode.includes(signature)) {
+                    const signatureHash = getFunctionSignature(signature)
+                    if (contractCode.includes(signatureHash)) {
                         supportedStandards.push(standard);
                     }
                 }
-                
                 nfts[contractAddress].supportedStandards = supportedStandards
             }
-            await sleep(1000)
         }
         console.log(nfts)
         return { nfts, ids };
@@ -71,4 +65,35 @@ async function checkNFTBalanceAndMetaTransactions(provider, address) {
     }
 }
 
-module.exports = { checkNFTBalanceAndMetaTransactions };
+async function checkNFTBalanceAndMetaTransactionsTRON(address) {
+    try {
+        const response = await axios.get(`https://api.trongrid.io/v1/accounts/${address}/transactions/trc20`, {
+            headers: {
+                'TRON-PRO-API-KEY': process.env.TRON_GRID_API_KEY,
+                'Content-Type': 'application/json'
+            },
+            body: {
+                address: address,
+                only_confirmed: true,
+                limit: 200,
+                only_to: true
+            }
+        });
+        const transactions = response.data.data
+        const nfts = {}
+        const nftTransactions = transactions.filter(tx => tx.type === 'Transfer' && tx.token_info.decimals == 0);
+        for (const tx of nftTransactions) {
+            const contractAddress = tx.token_info.address;
+            if (!nfts[contractAddress])
+                nfts[contractAddress] = { balance: 0 };
+            nfts[contractAddress].balance++
+        }
+        console.log(nfts)
+        return nfts;
+    } catch (error) {
+        console.error(`Ошибка при получении NFT для адреса ${address}: ${error.message}`);
+        return [];
+    }
+}
+
+module.exports = { checkNFTBalanceAndMetaTransactions, checkNFTBalanceAndMetaTransactionsTRON };
